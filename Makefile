@@ -1,4 +1,4 @@
-TOPNAME = shift_reg   #need modify
+TOPNAME ?= alu
 VERILATOR = verilator
 BUILD_DIR = ./build
 OBJ_DIR = $(BUILD_DIR)/obj_dir
@@ -10,34 +10,35 @@ $(shell mkdir -p $(BUILD_DIR))
 VSRCS = $(shell find $(abspath ./vsrc) -name "*.v")
 CSRCS = $(abspath ./csrc)/tb_$(TOPNAME).cpp
 
-VERILATOR_CFLAGS += --x-assign unique --x-initial unique\
-                        --trace-fst --timescale "1ns/1ns"\
-						 --no-timing --autoflush 
- 
+VERILATOR_FLAGS = --x-assign unique --x-initial unique \
+                  --trace-fst --timescale "1ns/1ns" \
+                  --no-timing --autoflush
+
 CXXFLAGS += -DTOP_MODULE=V$(TOPNAME)
 
-$(WAVES):$(VSRCS) $(CSRCS) 
-	@rm -rf $(OBJ_DIR)
+$(BIN): $(VSRCS) $(CSRCS)
 	@echo "### VERILATING ###"
-	$(VERILATOR) $(VERILATOR_CFLAGS) \
-	--top-module $(TOPNAME) \
-	-cc $(VSRCS) \
-	--Mdir $(OBJ_DIR) --exe $(CSRCS) \
-	$(addprefix -CFLAGS , $(CXXFLAGS))
-	@make -C $(OBJ_DIR) -f V$(TOPNAME).mk V$(TOPNAME)
+	$(VERILATOR) $(VERILATOR_FLAGS) \
+		--top-module $(TOPNAME) \
+		$(addprefix -CFLAGS , $(CXXFLAGS))\
+		--cc $(VSRCS) \
+		--exe $(CSRCS) \
+		--build \
+		-Mdir $(OBJ_DIR)
 
-sim:$(WAVES)
-	@$(BIN) 
+sim: $(BIN)
+	@echo "### SIMULATING ###"
+	$(BIN)
 
-waves:$(WAVES)
+waves: $(WAVES)
 	@gtkwave $(WAVES)
 
-lint:$(VSRCS)
-	$(VERILATOR) $(VERILATOR_CFLAGS) --lint-only \
-	--top-module $(TOPNAME) $(VSRCS)
+lint: $(VSRCS)
+	$(VERILATOR) $(VERILATOR_FLAGS) --lint-only \
+		--top-module $(TOPNAME) $(VSRCS)
 
 clean:
-	@rm -rf ./build
+	rm -rf $(BUILD_DIR)
 
 .PHONY: sim waves lint clean
 
