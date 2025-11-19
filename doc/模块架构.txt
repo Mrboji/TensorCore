@@ -1,0 +1,23 @@
+tensor_core_exev (最顶层包装)
+└─ tensor_core (AXI-Stream 顶层，含配置/握手逻辑)
+   |
+   ├─ to_fp9_con                 // AB 入口格式转换
+   |
+   ├─ to_next_con                // C 入口格式转换
+   |
+   ├─ SRAM(FP9) / SRAM(FP4-FP22) // 输入/累加缓存
+   |
+   ├─ mm_mul_add                 // GEMM→GEMV 主干
+   |  |
+   │  ├─ mv_mul × SHAPE_N        // 拆列向量
+   |  |  |
+   │  │  ├─ tc_mul × SHAPE_M×SHAPE_K
+   │  │  │  ├─ fmul_s1 → naivemultiplier → fmul_s2 → fmul_s3
+   │  │  │  └─ fadd_s1/fadd_s2 (含 far_path、near_path、round)
+   |  |  |  
+   │  │  └─ tc_add               // 行内加法树
+   │  └─ tc_mm_add               // 与 C SRAM 累加
+   ├─ SRAM(L1)                   // 中间结果暂存
+   └─ 输出回写/IRQ/配置寄存器
+
+
