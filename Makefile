@@ -1,4 +1,4 @@
-TOPNAME ?= fadd_s1
+TOPNAME ?= fadd_s2
 VERILATOR = verilator
 BUILD_DIR = ./build
 OBJ_DIR = $(BUILD_DIR)/obj_dir
