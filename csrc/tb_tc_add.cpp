@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "verilated.h"
 #include "verilated_fst_c.h"
 #include "Vtc_add.h"
@@ -31,10 +32,17 @@ void sim_init() {
 void reset(int n) {
     top->rst_n = 0;
     top->en_i  = 0;
-    while (n-- > 0) single_cycle();
+    top->rm_i  = 0;
+    top->a_i   = 0;
+    top->b_i   = 0;
+
+    while (n-- > 0)
+        single_cycle();
+
     top->rst_n = 1;
     single_cycle();
 }
+
 
 void sim_exit() {
     top->final();
@@ -54,108 +62,105 @@ uint32_t pack_fp(
     return (sign << (5 + 8)) | (exp << 8) | frac;
 }
 
-int main() {
+// ======================================================
+// pipeline-aware stimulus
+// tc_add = 2-stage pipeline → 等 3 cycle
+// ======================================================
+void apply_input(uint32_t a, uint32_t b, uint32_t rm) {
+    // drive phase（clk=0）
+    top->clk  = 0;
+    top->en_i = 1;
+    top->rm_i = rm;
+    top->a_i  = a;
+    top->b_i  = b;
+    step_and_dump_wave();
+    top->clk = 1;
+    step_and_dump_wave();
+}
+
+int main(int argc, char** argv) {
+    Verilated::commandArgs(argc, argv);
+
     sim_init();
     reset(5);
 
-    top->en_i = 1;
+    // ==================================================
+    // TC1: far path 正常加法 1.5 + 0.5
+    // ==================================================
+    apply_input(pack_fp(0,15,0x80), pack_fp(0,14,0x00), 0);
+    single_cycle();        // 拍1：Stage1
+    single_cycle();        // 拍2：Stage2（out_result_o 有效）
+    top->en_i = 0;
+    single_cycle();        // 拍3：平台
 
-    // 清空输入
-    top->rm_i = 0;
-    top->a_i  = 0;
-    top->b_i  = 0;
+    // ==================================================
+    // TC2: near path 完全抵消 +1.0 + (-1.0)
+    // ==================================================
+    apply_input(pack_fp(0,15,0x00), pack_fp(1,15,0x00), 0);
+    single_cycle();
+    single_cycle();
+    top->en_i = 0;
     single_cycle();
 
-    // ========================================================
-    // Testcase 1: 正常加法（far path）
-    // a = +1.5 , b = +0.5
-    // ========================================================
-    top->rm_i = 0; // RNE
+    // ==================================================
+    // TC3: 舍入模式覆盖
+    // ==================================================
+    uint32_t a = pack_fp(0,15,0x01);
+    uint32_t b = pack_fp(0,10,0x01);
 
-    top->a_i = pack_fp(0, 15, 0x80); // 1.5
-    top->b_i = pack_fp(0, 14, 0x00); // 0.5
-
+    // RNE
+    apply_input(a, b, 0);
     single_cycle();
-    // 期望：out_result_o ≈ +2.0
-    // 无异常标志
-
-    // ========================================================
-    // Testcase 2: 符号相反（near path）
-    // a = +1.0 , b = -1.0 → 0
-    // ========================================================
-    top->rm_i = 0;
-
-    top->a_i = pack_fp(0, 15, 0x00); // +1.0
-    top->b_i = pack_fp(1, 15, 0x00); // -1.0
-
     single_cycle();
-    // 期望：+0
-    // NX=0, UF=0
-
-    // ========================================================
-    // Testcase 3: 舍入测试（RNE）
-    // ========================================================
-    top->rm_i = 0;
-
-    top->a_i = pack_fp(0, 15, 0xFF);
-    top->b_i = pack_fp(0, 10, 0x01);
-
+    top->en_i = 0;
     single_cycle();
-    // 期望：发生 NX
 
-    // ========================================================
-    // Testcase 4: far path 下溢
-    // ========================================================
-    top->rm_i = 0;
+    // RTZ
+    //apply_input(a, b, 1);
+    //single_cycle();
+    //single_cycle();
+    //top->en_i = 0;
+    //single_cycle();
 
-    top->a_i = pack_fp(0, 0, 0x01);  // 极小数
-    top->b_i = pack_fp(0, 0, 0x01);
+    // RUP
+    //apply_input(a, b, 2);
+    //single_cycle();
+    //single_cycle();
+    //top->en_i = 0;
+    //single_cycle();
 
+    // RDN
+    //apply_input(a, b, 3);
+    //single_cycle();
+    //single_cycle();
+    //top->en_i = 0;
+    //single_cycle();
+
+    // ==================================================
+    // TC4: near path 溢出
+    // ==================================================
+    apply_input(pack_fp(0,30,0xFF), pack_fp(0,30,0xFF), 0);
     single_cycle();
-    // 期望：
-    // out_result_o = 0
-    // out_fflags_o[UF]=1
-    // out_far_uf_o = 1
-
-    // ========================================================
-    // Testcase 5: near path 溢出
-    // ========================================================
-    top->rm_i = 0;
-
-    top->a_i = pack_fp(0, 30, 0xFF);
-    top->b_i = pack_fp(0, 30, 0xFF);
-
     single_cycle();
-    // 期望：
-    // +Inf
-    // out_fflags_o[OF]=1
-    // out_near_of_o = 1
-
-    // ========================================================
-    // Testcase 6: NaN + normal
-    // ========================================================
-    top->rm_i = 0;
-
-    top->a_i = pack_fp(0, 31, 0x80); // NaN
-    top->b_i = pack_fp(0, 15, 0x00);
-
+    top->en_i = 0;
     single_cycle();
-    // 期望：NaN，NV=0
 
-    // ========================================================
-    // Testcase 7: Inf - Inf → Invalid
-    // ========================================================
-    top->rm_i = 0;
-
-    top->a_i = pack_fp(0, 31, 0x00); // +Inf
-    top->b_i = pack_fp(1, 31, 0x00); // -Inf
-
+    // ==================================================
+    // TC5: NaN + normal
+    // ==================================================
+    apply_input(pack_fp(0,31,0x80), pack_fp(0,15,0x00), 0);
     single_cycle();
-    // 期望：
-    // NaN
-    // out_fflags_o[NV]=1
-
     single_cycle();
+    top->en_i = 0;
+    single_cycle();
+
+    // ==================================================
+    // TC6: +Inf - Inf → Invalid
+    // ==================================================
+    apply_input(pack_fp(0,31,0x00), pack_fp(1,31,0x00), 0);
+    single_cycle();
+    single_cycle();
+    top->en_i = 0;
     single_cycle();
 
     sim_exit();

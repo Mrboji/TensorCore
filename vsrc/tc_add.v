@@ -15,6 +15,13 @@ module tc_add #(
     input   [EXPWIDTH+PRECISION:0]      a_i,       //操作数a
     input   [EXPWIDTH+PRECISION:0]      b_i,       //操作数b
 
+    //用于 fma 指令的标志信号，根据需要选择性保留
+    input                                   b_inter_valid_i,       //中间结果是否有效
+    input                                   b_inter_flags_is_nan_i, //中间结果为 NaN 标志   
+    input                                   b_inter_flags_is_inf_i, //中间结果为无穷标志
+    input                                   b_inter_flags_is_inv_i, //无效操作标志
+    input                                   b_inter_flags_overflow_i, //溢出标志
+
     // 输出数据和标志信号
     //out_result_o还有符号位，因此位宽需要修正为1+EXPWIDTH+PRECISION
     output  reg [EXPWIDTH+OUTPC:0]  out_result_o,//浮点加法结果
@@ -26,6 +33,13 @@ module tc_add #(
     // 定义一些局部参数
     localparam INTWIDTH = OUTPC;                  // 有效尾数位数
     localparam RESWIDTH = 1 + EXPWIDTH + OUTPC;   // 输出总宽度（sign + exp + frac）
+
+    // fflags bit index: {NV, OF, UF, DZ, NX}
+    localparam IDX_NV = 4;
+    localparam IDX_OF = 3;
+    localparam IDX_UF = 2;
+    localparam IDX_DZ = 1;
+    localparam IDX_NX = 0;
 
     // 全部为1用作 Inf/NaN 的指数
     localparam [EXPWIDTH-1:0] EXP_MAX = {EXPWIDTH{1'b1}};
@@ -76,11 +90,37 @@ module tc_add #(
     wire [EXPWIDTH-1:0] shift =
         a_ge_b ? (a_exp - b_exp) : (b_exp - a_exp);
 
-    wire [PRECISION+2:0] lostBits =
-        (shift <= (PRECISION+3)) ? (frac_small << (PRECISION+3-shift)) : frac_small;
+    wire [PRECISION+2:0] frac_small_sr;
+    reg  sticky_align;
+    integer j;
 
+    // 右移主体（组合）
+    assign frac_small_sr =
+        (shift >= (PRECISION+3)) ? { (PRECISION+3){1'b0} } :
+        (shift == 0)             ? frac_small :
+                                (frac_small >> shift);
+
+    // 计算 sticky_align：OR 被移位丢弃的低位
+    always @(*) begin
+        sticky_align = 1'b0;
+
+        if (shift > 0) begin
+            if (shift >= (PRECISION+3)) begin
+                // 全部被移掉
+                sticky_align = |frac_small;
+            end
+            else begin
+                // OR frac_small[shift-1 : 0]
+                for (j = 0; j < shift; j = j + 1) begin
+                    sticky_align = sticky_align | frac_small[j];
+                end
+            end
+        end
+    end
+
+    // 拼接成 {右移结果, sticky}
     wire [PRECISION+3:0] shifted_fraction_small =
-        { (frac_small >> shift), (|lostBits) };
+        { frac_small_sr, 1'b0 };
 
     //移位与计算sticky
     wire [PRECISION+5:0] FRAC_SMALL =
@@ -92,11 +132,21 @@ module tc_add #(
                    : {sign_large, sign_large,  frac_large,           1'b0};
 
     wire [PRECISION+5:0] sum = FRAC_LARGE + FRAC_SMALL;
+    
 
     // 阶段1 -> 阶段2流水线寄存器
     reg [PRECISION+5:0] sum_stage2;
     reg [EXPWIDTH-1:0]  exp_large_stage2;
     reg [EXPWIDTH + PRECISION:0] a_reg, b_reg;
+    // 控制信号（Stage1 锁存）
+    reg [2:0] s2_rm;              // 你已加入：rm pipeline
+    reg       s1_sel_far;         // shift>=2 pipeline
+    reg       s1_bypass_a0;
+    reg       s1_bypass_b0;
+    reg       s1_sp_nan;
+    reg       s1_sp_iv;
+    reg       s1_sp_inf;
+    reg       s1_sp_inf_sign;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -104,16 +154,36 @@ module tc_add #(
             exp_large_stage2 <= {EXPWIDTH{1'b0}};
             a_reg            <= {(EXPWIDTH+PRECISION+1){1'b0}};
             b_reg            <= {(EXPWIDTH+PRECISION+1){1'b0}};
-        end else if (en_i) begin
+
+            s2_rm            <= 3'b000;
+            s1_sel_far       <= 1'b0;
+            s1_bypass_a0     <= 1'b0;
+            s1_bypass_b0     <= 1'b0;
+            s1_sp_nan        <= 1'b0;
+            s1_sp_iv         <= 1'b0;
+            s1_sp_inf        <= 1'b0;
+            s1_sp_inf_sign   <= 1'b0;
+        end
+        else if (en_i) begin
             sum_stage2       <= sum;
             exp_large_stage2 <= exp_large;
             a_reg            <= a_i;
             b_reg            <= b_i;
+
+            s2_rm            <= rm_i;
+            s1_sel_far       <= (shift >= 2);
+            s1_bypass_a0     <= (a_is_zero & ~b_is_zero);
+            s1_bypass_b0     <= (b_is_zero & ~a_is_zero);
+            s1_sp_nan        <= sp_nan;
+            s1_sp_iv         <= sp_iv;
+            s1_sp_inf        <= sp_inf;
+            s1_sp_inf_sign   <= sp_inf_sign;
         end
     end
 
     // 阶段2：加法
     wire [PRECISION+5:0] SUM = sum_stage2[PRECISION+5] ? (~sum_stage2 + 1'b1) : sum_stage2;
+    wire sum_is_zero = (SUM == { (PRECISION+6){1'b0} });
 
     //前导1检测
     wire [($clog2(PRECISION + 5) - 1):0] k;
@@ -133,9 +203,12 @@ generate    //目前仅支持PRECISION=8和PRECISION=28两种情况
     assign data_chk[0] = |Part_3[1];                    // 选中的2位中的高1位
   //assign data_chk[0] = |Part_4[1];                    // 选中的1位中的高0位
   // 逐级选择包含前导1的数据段
-    assign Part_1 = (data_chk[3]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0];
-    assign Part_2 = (data_chk[2]) ? Part_1[7:4]    : Part_1[3:0];
-    assign Part_3 = (data_chk[1]) ? Part_2[3:2]    : Part_2[1:0];
+    assign Part_1 = (|expand_SUM_16bit[15:8]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0];
+    assign Part_2 = (|Part_1[7:4]) ? Part_1[7:4]    : Part_1[3:0];
+    assign Part_3 = (|Part_2[3:2]) ? Part_2[3:2]    : Part_2[1:0];
+    //assign Part_1 = (data_chk[3]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0]; verilatior 组合逻辑优化报错  
+    //assign Part_2 = (data_chk[2]) ? Part_1[7:4]    : Part_1[3:0];
+    //assign Part_3 = (data_chk[1]) ? Part_2[3:2]    : Part_2[1:0];
   //assign Part_4 = (data_chk[1]) ? Part_3[3:2]    : Part_3[1:0];
 
     assign k = data_chk;
@@ -153,10 +226,10 @@ generate    //目前仅支持PRECISION=8和PRECISION=28两种情况
     assign data_chk[1] = |Part_3[3:2];     // 选中的4位中的高2位
     assign data_chk[0] = |Part_4[1];       // 选中的2位中的高1位
   // 逐级选择包含前导1的数据段
-    assign Part_1 = (data_chk[4]) ? SUM[31:16]     : SUM[15:0];
-    assign Part_2 = (data_chk[3]) ? Part_1[15:8]   : Part_1[7:0];
-    assign Part_3 = (data_chk[2]) ? Part_2[7:4]    : Part_2[3:0];
-    assign Part_4 = (data_chk[1]) ? Part_3[3:2]    : Part_3[1:0];
+    assign Part_1 = (|SUM[31:16]) ? SUM[31:16]     : SUM[15:0];
+    assign Part_2 = (|Part_1[15:8]) ? Part_1[15:8]   : Part_1[7:0];
+    assign Part_3 = (|Part_2[7:4]) ? Part_2[7:4]    : Part_2[3:0];
+    assign Part_4 = (|Part_3[3:2]) ? Part_3[3:2]    : Part_3[1:0];
 
     assign k = SUM[32]?{{(($clog2(PRECISION + 5) - 1)-6){1'b0}},6'b100000}:data_chk;
   end
@@ -184,11 +257,9 @@ endgenerate
         ((exp_large_stage2 + k) > (PRECISION+3)) ? normalizedSum
                                                  : (SUM << (exp_large_stage2 - 1));
 
-    wire [PRECISION+5:0] sticky =
-        (k > (PRECISION+2)) ? (SUM << (2*(PRECISION+4) - k))
-                            : (SUM << (PRECISION+5));
+    wire sticky = |NorSum[PRECISION+5-OUTPC-3 : 0];
 
-    wire [PRECISION+5:0] NorSumm = {NorSum[PRECISION+5:1], |sticky};
+    wire [PRECISION+5:0] NorSumm = { NorSum[PRECISION+5:1], sticky };
 
     
     // NorSumm: [PRECISION+5:0] = 14 bits when PRECISION=8
@@ -199,23 +270,15 @@ endgenerate
     //   pre_sig[1]   round
     //   pre_sig[0]   stky
 
-    wire [OUTPC-1:0] s1_mant = NorSumm[PRECISION+5 -: OUTPC];         // NorSumm[13:10]
-    wire             s1_guard = NorSumm[PRECISION+5-OUTPC-1];           // NorSumm[9]
-    wire             s1_round = NorSumm[PRECISION+5-OUTPC-2];           // NorSumm[8]
-
-    // sticky：把更低位全部 OR（注意边界下标要合法）
-    wire             s1_stky = |NorSumm[PRECISION+5-OUTPC-3 : 0];     // OR NorSumm[7:0]
+    wire [OUTPC-1:0] s1_mant  = NorSumm[10:7];
+    wire              s1_guard = NorSumm[6];
+    wire              s1_round = NorSumm[5];
+    wire              s1_stky  = |NorSumm[4:0];
 
     wire [OUTPC+2:0] s1_sig  = {s1_mant, s1_guard, s1_round, s1_stky}; // 7 bits 
 
     wire s1_sign = sum_stage2[PRECISION+5];      // 补码符号位
     wire [EXPWIDTH-1:0] s1_exp = EpreFinal;
-
-    wire s1_sel_far = (shift >= 2);
-
-    //0 bypass,若 a=0 -> 直接输出 b；若 b=0 -> 直接输出 a
-    wire bypass_a0 = a_is_zero & ~b_is_zero;
-    wire bypass_b0 = b_is_zero & ~a_is_zero;
 
     //将bypass的操作数压缩成OUTPC+3 sig（从 PRECISION frac 降到 OUTPC + GRS）
     function [OUTPC+2:0] pack_sig_from_frac;
@@ -231,8 +294,8 @@ endgenerate
         end
     endfunction
 
-    wire [OUTPC+2:0] bz_sig_a = pack_sig_from_frac(a_i[PRECISION-1:0]);
-    wire [OUTPC+2:0] bz_sig_b = pack_sig_from_frac(b_i[PRECISION-1:0]);
+    wire [OUTPC+2:0] bz_sig_a = pack_sig_from_frac(a_reg[PRECISION-1:0]);
+    wire [OUTPC+2:0] bz_sig_b = pack_sig_from_frac(b_reg[PRECISION-1:0]);
 
     // 阶段1 -> 阶段2流水线寄存器
     reg                s2_sign;
@@ -258,24 +321,33 @@ endgenerate
             s2_sp_inf_sign <= 1'b0;
         end
         else if (en_i) begin
-            // special cases 优先级：NaN/IV/Inf/Zero bypass
-            s2_sp_nan <= sp_nan;
-            s2_sp_iv  <= sp_iv;
-            s2_sp_inf <= sp_inf;
-            s2_sp_inf_sign <= sp_inf_sign;
+            // special cases flags：用 Stage1 锁存版本
+            s2_sp_nan <= s1_sp_nan;
+            s2_sp_iv  <= s1_sp_iv;
+            s2_sp_inf <= s1_sp_inf;
+            s2_sp_inf_sign <= s1_sp_inf_sign;
 
+            // far/near：用 Stage1 锁存版本
             s2_sel_far <= s1_sel_far;
 
-            if (bypass_a0) begin
-                s2_sign <= b_i[EXPWIDTH+PRECISION];
-                s2_exp  <= b_i[EXPWIDTH+PRECISION-1:PRECISION];
+            // 最高优先级：完全抵消 -> +0
+            if (sum_is_zero) begin
+                s2_sign <= 1'b0;
+                s2_exp  <= {EXPWIDTH{1'b0}};
+                s2_sig  <= {(OUTPC+3){1'b0}};
+            end
+            // bypass：用 Stage1 锁存版本，并使用 a_reg/b_reg
+            else if (s1_bypass_a0) begin
+                s2_sign <= b_reg[EXPWIDTH+PRECISION];
+                s2_exp  <= b_reg[EXPWIDTH+PRECISION-1:PRECISION];
                 s2_sig  <= bz_sig_b;
             end
-            else if (bypass_b0) begin
-                s2_sign <= a_i[EXPWIDTH+PRECISION];
-                s2_exp  <= a_i[EXPWIDTH+PRECISION-1:PRECISION];
+            else if (s1_bypass_b0) begin
+                s2_sign <= a_reg[EXPWIDTH+PRECISION];
+                s2_exp  <= a_reg[EXPWIDTH+PRECISION-1:PRECISION];
                 s2_sig  <= bz_sig_a;
             end
+            // 正常路径
             else begin
                 s2_sign <= s1_sign;
                 s2_exp  <= s1_exp;
@@ -288,18 +360,19 @@ endgenerate
 
     //解析 mant/guard/sticky
     wire [OUTPC-1:0] mant_trunc = s2_sig[OUTPC+2:3];
-    wire guard_bit = s2_sig[2];
-    wire sticky_bit = |s2_sig[1:0];
-    wire any_round_bits = guard_bit | sticky_bit;
+    wire guard_bit  = s2_sig[2];
+    wire round_bit  = s2_sig[1];
+    wire sticky_bit = s2_sig[0];
+    wire any_round_bits = guard_bit | round_bit | sticky_bit;
 
     //计算舍入增量（inc = 是否 +1）
     reg inc_round;
     always @(*) begin
-        case (rm_i)
-            3'b000: inc_round = guard_bit & (sticky_bit | mant_trunc[0]); // RNE
-            3'b001: inc_round = 1'b0;                                     // RTZ
-            3'b010: inc_round = (~s2_sign) & any_round_bits;              // RUP
-            3'b011: inc_round = ( s2_sign) & any_round_bits;              // RDN
+        case (s2_rm)
+            3'b000: inc_round = guard_bit & (round_bit | sticky_bit | mant_trunc[0]); // RNE
+            //3'b001: inc_round = 1'b0;                                                 // RTZ
+            //3'b010: inc_round = (~s2_sign) & any_round_bits;                          // RUP
+            //3'b011: inc_round = ( s2_sign) & any_round_bits;                          // RDN
             default: inc_round = guard_bit & (sticky_bit | mant_trunc[0]);
         endcase
     end
@@ -314,36 +387,49 @@ endgenerate
 
     always @(*) begin
         // 默认值
-        mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
+        mant_ext_rounded = {1'b0, mant_trunc};
         //默认是在原尾数前加一个0，便于计算进位。加上的进位信号为尾数位个0+计算出来的是否舍入值
+        mant_final       = mant_trunc;
+        exp_final        = s2_exp;
 
         flag_overflow    = 1'b0;
         flag_underflow   = 1'b0;
 
-        // 溢出：尾数进位
-        if (mant_ext_rounded[OUTPC]) begin
-            // 尾数向右移 1 位并指数 +1
-            mant_final = mant_ext_rounded[OUTPC : 1];
-
-            // 指数 +1，检查是否溢出到 INF/NaN 范围
-            if (s2_exp == EXP_MAX - 1'b1) begin
-                // 进一步 +1 会到 EXP_MAX，视作 Overflow -> Inf
-                exp_final     = EXP_MAX;
-                mant_final    = {OUTPC{1'b0}}; // 表示 Inf
-                flag_overflow = 1'b1;
-            end
-            else begin
-                exp_final = s2_exp + 1'b1;
-            end
+        //规格化后指数已经进入 EXP_MAX 区域：视为 overflow
+        //EXP_MAX(全1) 是 Inf/NaN 指数，不能作为 normal
+        if (s2_exp >= EXP_MAX) begin
+            exp_final     = EXP_MAX;
+            mant_final    = {OUTPC{1'b0}}; // Inf
+            flag_overflow = 1'b1;
+            flag_underflow= 1'b0;
         end
         else begin
-            // 尾数无进位，仅复制
-            mant_final = mant_ext_rounded[OUTPC-1 : 0];
-            exp_final  = s2_exp;
+            //按舍入模式决定是否 +1
+            mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
 
-            // 非严格的 underflow 判定（当指数已经在最小附近且仍然发生了舍入）
-            if (s2_exp == {EXPWIDTH{1'b0}} && any_round_bits && (mant_trunc == {OUTPC{1'b0}})) begin
-                flag_underflow = 1'b1;
+            //溢出：舍入导致 mantissa 进位 -> 指数 +1
+            if (mant_ext_rounded[OUTPC]) begin
+                mant_final = mant_ext_rounded[OUTPC:1];
+
+                // 指数 +1 后如果到 EXP_MAX -> overflow -> Inf
+                if (s2_exp == (EXP_MAX - 1'b1)) begin
+                    exp_final     = EXP_MAX;
+                    mant_final    = {OUTPC{1'b0}}; // Inf
+                    flag_overflow = 1'b1;
+                end
+                else begin
+                    exp_final = s2_exp + 1'b1;
+                end
+            end
+            else begin
+                // 无进位，指数不变
+                mant_final = mant_ext_rounded[OUTPC-1:0];
+                exp_final  = s2_exp;
+
+                if (s2_exp == {EXPWIDTH{1'b0}} && any_round_bits &&
+                    (mant_trunc == {OUTPC{1'b0}})) begin
+                    flag_underflow = 1'b1;
+                end
             end
         end
     end
@@ -355,26 +441,56 @@ endgenerate
     wire [RESWIDTH-1:0] result_qnan = {1'b0, EXP_MAX, {1'b1, {OUTPC-1{1'b0}}}};
     wire [RESWIDTH-1:0] result_inf  = {s2_sp_inf_sign, EXP_MAX, {OUTPC{1'b0}}};
 
-    wire use_nan = s2_sp_nan | s2_sp_iv;   // invalid -> NaN
-    wire use_inf = s2_sp_inf & ~use_nan;
+    wire gen_overflow_inf = flag_overflow;  // IEEE: 运算溢出 → Inf
+
+    wire use_nan = s2_sp_nan | s2_sp_iv;
+    wire use_inf = (s2_sp_inf | gen_overflow_inf) & ~use_nan;
 
     wire [RESWIDTH-1:0] result_comb = use_nan ? result_qnan :
                                       use_inf ? result_inf  :
                                       result_normal;
                         
     //fflags 汇总
-    wire nx_flag = any_round_bits | flag_overflow | flag_underflow;
+    wire use_special = use_nan | use_inf;
 
-    wire [4:0] fflags_comb = {
-        /*NV*/ s2_sp_iv,
-        /*OF*/ (~use_nan & ~use_inf) ? flag_overflow  : 1'b0,
-        /*UF*/ (~use_nan & ~use_inf) ? flag_underflow : 1'b0,
-        /*DZ*/ 1'b0,
-        /*NX*/ (~use_nan & ~use_inf) ? nx_flag        : 1'b0
-    };
+    reg [RESWIDTH-1:0] result_comb_r;
+    reg [4:0]          fflags_comb_r;
+    reg                far_uf_comb_r, near_of_comb_r;
 
-    wire far_uf_comb  = s2_sel_far  ? ((~use_nan & ~use_inf) & flag_underflow) : 1'b0;
-    wire near_of_comb = (~s2_sel_far) ? ((~use_nan & ~use_inf) & flag_overflow) : 1'b0;
+    always @(*) begin
+        // ---------- result select ----------
+        result_comb_r = use_nan ? result_qnan :
+                        use_inf ? result_inf  :
+                                result_normal;
+
+        // ---------- default ----------
+        fflags_comb_r  = 5'b0;
+        far_uf_comb_r  = 1'b0;
+        near_of_comb_r = 1'b0;
+
+        // ---------- NaN / Invalid ----------
+        if (use_nan) begin
+            fflags_comb_r[IDX_NV] = 1'b1;
+        end
+        else begin
+            // ---------- normal ----------
+            fflags_comb_r[IDX_NV] = 1'b0;
+            fflags_comb_r[IDX_OF] = flag_overflow;
+            fflags_comb_r[IDX_UF] = flag_underflow;
+            fflags_comb_r[IDX_DZ] = 1'b0;
+            fflags_comb_r[IDX_NX] =
+                any_round_bits | flag_overflow | flag_underflow;
+
+            far_uf_comb_r  = s2_sel_far  & flag_underflow;
+            near_of_comb_r = (~s2_sel_far) & flag_overflow;
+        end
+    end
+
+    // connect to output stage
+    wire [RESWIDTH-1:0] result_comb  = result_comb_r;
+    wire [4:0]          fflags_comb  = fflags_comb_r;
+    wire                far_uf_comb  = far_uf_comb_r;
+    wire                near_of_comb = near_of_comb_r;
 
     //输出结果
     always @(posedge clk or negedge rst_n) begin
