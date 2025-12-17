@@ -197,9 +197,9 @@ generate    //目前仅支持PRECISION=8和PRECISION=28两种情况
     assign data_chk[0] = |Part_3[1];                    // 选中的2位中的高1位
   //assign data_chk[0] = |Part_4[1];                    // 选中的1位中的高0位
   // 逐级选择包含前导1的数据段
-    assign Part_1 = (data_chk[3]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0];
-    assign Part_2 = (data_chk[2]) ? Part_1[7:4]    : Part_1[3:0];
-    assign Part_3 = (data_chk[1]) ? Part_2[3:2]    : Part_2[1:0];
+    assign Part_1 = (|expand_SUM_16bit[15:8]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0];
+    assign Part_2 = (|Part_1[7:4]) ? Part_1[7:4]    : Part_1[3:0];
+    assign Part_3 = (|Part_2[3:2]) ? Part_2[3:2]    : Part_2[1:0];
   //assign Part_4 = (data_chk[1]) ? Part_3[3:2]    : Part_3[1:0];
 
     assign k = data_chk;
@@ -273,9 +273,9 @@ assign NorSumm = {NorSum[PRECISION + 5:1], |sticky};
               (rm_i == 3'b011) ? (NorSumm[PRECISION + 1] ? NorSumm + 1'b1 : NorSumm) : //就近舍入到偶数
               NorSumm; //默认就近舍入*/
 assign Sum =  NorSumm[2] == 0 ? NorSumm :
-              NorSumm[1] == 1 ? (NorSumm + 4'b1000) :
-              NorSumm[0] == 1 ? (NorSumm + 4'b1000) :
-              NorSumm[3] == 0 ? NorSumm : (NorSumm + 4'b1000);
+              NorSumm[1] == 1 ? (NorSumm + {{(PRECISION + 1){1'b0}} , {4'b1000}}) ://(NorSumm + 4'b1000) :
+              NorSumm[0] == 1 ? (NorSumm + {{(PRECISION + 1){1'b0}} , {4'b1000}}):
+              NorSumm[3] == 0 ? NorSumm : (NorSumm + {{(PRECISION + 1){1'b0}} , {4'b1000}});
 /*    assign Sum = NorSumm[2] == 0 ? NorSumm :
                  NorSumm[1] == 1 ? (NorSumm + 4'b1000) :
                  NorSumm[0] == 1 ? (NorSumm + 4'b1000) :
