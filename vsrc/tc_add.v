@@ -119,8 +119,7 @@ module tc_add #(
     end
 
     // 拼接成 {右移结果, sticky}
-    wire [PRECISION+3:0] shifted_fraction_small =
-        { frac_small_sr, 1'b0 };
+    wire [PRECISION+3:0] shifted_fraction_small = { frac_small_sr, sticky_align};
 
     //移位与计算sticky
     wire [PRECISION+5:0] FRAC_SMALL =
@@ -356,141 +355,138 @@ endgenerate
         end
     end
 
-// Stage2：rounding + overflow/underflow + pack + fflags
+    // Stage2：rounding + overflow/underflow + pack + fflags
 
-    //解析 mant/guard/sticky
+    // 1) special-case 判定
+    wire is_nan_in = s2_sp_nan;     // 任一 NaN 输入 / inf-inf(opposite) -> NaN
+    wire is_iv_in  = s2_sp_iv;      // invalid：仅 inf - inf 这种
+    wire is_inf_in = s2_sp_inf;     // 任一 Inf 输入且不触发 NaN/IV
+    wire use_nan   = is_nan_in | is_iv_in;
+
+    // 2) 解析normal 路径的mant/GRS
     wire [OUTPC-1:0] mant_trunc = s2_sig[OUTPC+2:3];
-    wire guard_bit  = s2_sig[2];
-    wire round_bit  = s2_sig[1];
-    wire sticky_bit = s2_sig[0];
-    wire any_round_bits = guard_bit | round_bit | sticky_bit;
+    wire guard_bit   = s2_sig[2];
+    wire round_bit   = s2_sig[1];
+    wire sticky_bit  = s2_sig[0];
+    wire any_round_bits_raw = guard_bit | round_bit | sticky_bit;
 
-    //计算舍入增量（inc = 是否 +1）
+    // special-case 时：强制认为没有舍入比特
+    wire any_round_bits = (use_nan | is_inf_in) ? 1'b0 : any_round_bits_raw;
+
+    // 3) RNE 舍入增量（special-case 时 inc_round 强制 0）
     reg inc_round;
     always @(*) begin
-        case (s2_rm)
-            3'b000: inc_round = guard_bit & (round_bit | sticky_bit | mant_trunc[0]); // RNE
-            //3'b001: inc_round = 1'b0;                                                 // RTZ
-            //3'b010: inc_round = (~s2_sign) & any_round_bits;                          // RUP
-            //3'b011: inc_round = ( s2_sign) & any_round_bits;                          // RDN
-            default: inc_round = guard_bit & (sticky_bit | mant_trunc[0]);
-        endcase
+        if (use_nan | is_inf_in) begin
+            inc_round = 1'b0;
+        end else begin
+            case (s2_rm)
+                3'b000: inc_round = guard_bit & (round_bit | sticky_bit | mant_trunc[0]); // RNE
+                //3'b001: inc_round = 1'b0;                                                 // RTZ
+                //3'b010: inc_round = (~s2_sign) & any_round_bits;                          // RUP
+                //3'b011: inc_round = ( s2_sign) & any_round_bits;                          // RDN
+                default: inc_round = guard_bit & (sticky_bit | mant_trunc[0]);
+            endcase
+        end
     end
 
-    //尾数舍入 & 指数调整
-    reg [OUTPC:0]   mant_ext_rounded;  // OUTPC+1 bits
-    reg [OUTPC-1:0] mant_final;
+    // 4) rounding + overflow/underflow
+    reg [OUTPC:0]      mant_ext_rounded;  // OUTPC+1
+    reg [OUTPC-1:0]    mant_final;
     reg [EXPWIDTH-1:0] exp_final;
-
     reg flag_overflow;
     reg flag_underflow;
 
     always @(*) begin
-        // 默认值
-        mant_ext_rounded = {1'b0, mant_trunc};
-        //默认是在原尾数前加一个0，便于计算进位。加上的进位信号为尾数位个0+计算出来的是否舍入值
-        mant_final       = mant_trunc;
-        exp_final        = s2_exp;
+        if (s2_exp == EXP_MAX) begin
+                mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
+                mant_final       = mant_trunc;
+                exp_final        = s2_exp;
+                flag_overflow    = 1'b0;
+                flag_underflow   = 1'b0;
+            end
 
-        flag_overflow    = 1'b0;
-        flag_underflow   = 1'b0;
-
-        //规格化后指数已经进入 EXP_MAX 区域：视为 overflow
-        //EXP_MAX(全1) 是 Inf/NaN 指数，不能作为 normal
-        if (s2_exp >= EXP_MAX) begin
-            exp_final     = EXP_MAX;
-            mant_final    = {OUTPC{1'b0}}; // Inf
-            flag_overflow = 1'b1;
-            flag_underflow= 1'b0;
-        end
         else begin
-            //按舍入模式决定是否 +1
+            // 默认：normal
             mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
+            mant_final       = mant_trunc;
+            exp_final        = s2_exp;
+            flag_overflow    = 1'b0;
+            flag_underflow   = 1'b0;
 
-            //溢出：舍入导致 mantissa 进位 -> 指数 +1
-            if (mant_ext_rounded[OUTPC]) begin
-                mant_final = mant_ext_rounded[OUTPC:1];
-
-                // 指数 +1 后如果到 EXP_MAX -> overflow -> Inf
-                if (s2_exp == (EXP_MAX - 1'b1)) begin
-                    exp_final     = EXP_MAX;
-                    mant_final    = {OUTPC{1'b0}}; // Inf
-                    flag_overflow = 1'b1;
-                end
-                else begin
-                    exp_final = s2_exp + 1'b1;
-                end
+            // special-case：禁止产生 OF/UF，也禁止把 exp==EXP_MAX 当 overflow
+            if (use_nan | is_inf_in) begin
+                mant_final     = mant_trunc;
+                exp_final      = s2_exp;
+                flag_overflow  = 1'b0;
+                flag_underflow = 1'b0;
             end
             else begin
-                // 无进位，指数不变
-                mant_final = mant_ext_rounded[OUTPC-1:0];
-                exp_final  = s2_exp;
-
-                if (s2_exp == {EXPWIDTH{1'b0}} && any_round_bits &&
-                    (mant_trunc == {OUTPC{1'b0}})) begin
-                    flag_underflow = 1'b1;
+                // 舍入进位导致规格化（mant_ext_rounded[OUTPC]==1）
+                if (mant_ext_rounded[OUTPC]) begin
+                    mant_final = mant_ext_rounded[OUTPC:1];
+                    if (s2_exp == (EXP_MAX - 1'b1)) begin
+                        // normal 溢出 -> Inf
+                        exp_final     = EXP_MAX;
+                        mant_final    = {OUTPC{1'b0}};
+                        flag_overflow = 1'b1;
+                    end else begin
+                        exp_final = s2_exp + 1'b1;
+                    end
+                end else begin
+                    mant_final = mant_ext_rounded[OUTPC-1:0];
+                    exp_final  = s2_exp;
+                    if (s2_exp == {EXPWIDTH{1'b0}} && any_round_bits_raw &&
+                        (mant_trunc == {OUTPC{1'b0}})) begin
+                        flag_underflow = 1'b1;
+                    end
                 end
             end
         end
     end
 
-    // normal result
+    // 5) 结果打包：注意 overflow->Inf 的符号应来自 s2_sign，不是 sp_inf_sign
     wire [RESWIDTH-1:0] result_normal = {s2_sign, exp_final, mant_final};
-    
-    // special result
-    wire [RESWIDTH-1:0] result_qnan = {1'b0, EXP_MAX, {1'b1, {OUTPC-1{1'b0}}}};
-    wire [RESWIDTH-1:0] result_inf  = {s2_sp_inf_sign, EXP_MAX, {OUTPC{1'b0}}};
+    wire [RESWIDTH-1:0] result_qnan   = {1'b0, EXP_MAX, {1'b1, {OUTPC-1{1'b0}}}};
+    wire [RESWIDTH-1:0] result_inf_sp = {s2_sp_inf_sign, EXP_MAX, {OUTPC{1'b0}}};
+    wire [RESWIDTH-1:0] result_inf_of = {s2_sign,         EXP_MAX, {OUTPC{1'b0}}};
 
-    wire gen_overflow_inf = flag_overflow;  // IEEE: 运算溢出 → Inf
+    // overflow 生成 Inf
+    wire gen_overflow_inf = flag_overflow;
 
-    wire use_nan = s2_sp_nan | s2_sp_iv;
-    wire use_inf = (s2_sp_inf | gen_overflow_inf) & ~use_nan;
+    // 最终 Inf 选择：若是输入 Inf 则用 sp_inf_sign；若是 overflow 则用 s2_sign
+    wire use_inf = (is_inf_in | gen_overflow_inf) & ~use_nan;
 
-    wire [RESWIDTH-1:0] result_comb = use_nan ? result_qnan :
-                                      use_inf ? result_inf  :
-                                      result_normal;
-                        
-    //fflags 汇总
-    wire use_special = use_nan | use_inf;
+    wire [RESWIDTH-1:0] result_comb =
+        use_nan ? result_qnan :
+        is_inf_in ? result_inf_sp :
+        gen_overflow_inf ? result_inf_of :
+        result_normal;
 
-    reg [RESWIDTH-1:0] result_comb_r;
-    reg [4:0]          fflags_comb_r;
-    reg                far_uf_comb_r, near_of_comb_r;
+    // 6) fflags：IEEE 语义（关键：NaN 传播不一定 NV，只有 invalid 才 NV）
+    reg [4:0] fflags_comb;
+    reg       far_uf_comb, near_of_comb;
 
     always @(*) begin
-        // ---------- result select ----------
-        result_comb_r = use_nan ? result_qnan :
-                        use_inf ? result_inf  :
-                                result_normal;
+        fflags_comb  = 5'b0;
+        far_uf_comb  = 1'b0;
+        near_of_comb = 1'b0;
 
-        // ---------- default ----------
-        fflags_comb_r  = 5'b0;
-        far_uf_comb_r  = 1'b0;
-        near_of_comb_r = 1'b0;
+        // NV：只有 invalid（inf - inf）触发
+        fflags_comb[IDX_NV] = is_iv_in;
 
-        // ---------- NaN / Invalid ----------
-        if (use_nan) begin
-            fflags_comb_r[IDX_NV] = 1'b1;
+        // 对于 NaN/Inf 输入：不应产生 OF/UF/NX（IEEE 语义）
+        if (!(use_nan | is_inf_in)) begin
+            fflags_comb[IDX_OF] = flag_overflow;
+            fflags_comb[IDX_UF] = flag_underflow;
+            fflags_comb[IDX_DZ] = 1'b0;
+            fflags_comb[IDX_NX] = any_round_bits_raw | flag_overflow | flag_underflow;
         end
-        else begin
-            // ---------- normal ----------
-            fflags_comb_r[IDX_NV] = 1'b0;
-            fflags_comb_r[IDX_OF] = flag_overflow;
-            fflags_comb_r[IDX_UF] = flag_underflow;
-            fflags_comb_r[IDX_DZ] = 1'b0;
-            fflags_comb_r[IDX_NX] =
-                any_round_bits | flag_overflow | flag_underflow;
 
-            far_uf_comb_r  = s2_sel_far  & flag_underflow;
-            near_of_comb_r = (~s2_sel_far) & flag_overflow;
-        end
+        // near/far 标志：只对 OF/UF 进行分类
+        far_uf_comb  = s2_sel_far     & flag_underflow;
+        near_of_comb = (~s2_sel_far)  & flag_overflow;
     end
 
-    // connect to output stage
-    wire [RESWIDTH-1:0] result_comb  = result_comb_r;
-    wire [4:0]          fflags_comb  = fflags_comb_r;
-    wire                far_uf_comb  = far_uf_comb_r;
-    wire                near_of_comb = near_of_comb_r;
 
     //输出结果
     always @(posedge clk or negedge rst_n) begin
