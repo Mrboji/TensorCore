@@ -16,7 +16,7 @@ module tc_add #(
     input   [EXPWIDTH+PRECISION:0]      b_i,       //操作数b
 
     //用于 fma 指令的标志信号，根据需要选择性保留
-    input                                   b_inter_valid_i,       //中间结果是否有效
+    input                                   b_inter_valid_i,        //中间结果是否有效
     input                                   b_inter_flags_is_nan_i, //中间结果为 NaN 标志   
     input                                   b_inter_flags_is_inf_i, //中间结果为无穷标志
     input                                   b_inter_flags_is_inv_i, //无效操作标志
@@ -76,8 +76,12 @@ module tc_add #(
     wire [PRECISION+2:0] b_frac = {hidden_b, b_i[PRECISION-1:0], 2'b00};
 
     // 阶码比较与移位计算
-    wire a_ge_b = (a_exp >= b_exp);
-
+    //wire a_ge_b = (a_exp >= b_exp);
+    wire a_ge_b,b_ge_a;
+    wire [EXPWIDTH-1:0] a_sub_b;
+    assign {b_ge_a, a_sub_b} = a_exp - b_exp;
+    assign a_ge_b = !b_ge_a;
+    
     wire sign_large = a_ge_b ? a_sign : b_sign;
     wire sign_small = a_ge_b ? b_sign : a_sign;
 
@@ -88,7 +92,7 @@ module tc_add #(
     wire [PRECISION+2:0] frac_small = a_ge_b ? b_frac : a_frac;
 
     wire [EXPWIDTH-1:0] shift =
-        a_ge_b ? (a_exp - b_exp) : (b_exp - a_exp);
+        a_ge_b ? a_sub_b : (~a_sub_b + 1'b1);
 
     wire [PRECISION+2:0] frac_small_sr;
     reg  sticky_align;
@@ -208,7 +212,7 @@ generate    //目前仅支持PRECISION=8和PRECISION=28两种情况
     //assign Part_1 = (data_chk[3]) ? expand_SUM_16bit[15:8]  : expand_SUM_16bit[7:0]; verilatior 组合逻辑优化报错  
     //assign Part_2 = (data_chk[2]) ? Part_1[7:4]    : Part_1[3:0];
     //assign Part_3 = (data_chk[1]) ? Part_2[3:2]    : Part_2[1:0];
-  //assign Part_4 = (data_chk[1]) ? Part_3[3:2]    : Part_3[1:0];
+   //assign Part_4 = (data_chk[1]) ? Part_3[3:2]    : Part_3[1:0];
 
     assign k = data_chk;
   end
@@ -381,10 +385,10 @@ endgenerate
         end else begin
             case (s2_rm)
                 3'b000: inc_round = guard_bit & (round_bit | sticky_bit | mant_trunc[0]); // RNE
-                //3'b001: inc_round = 1'b0;                                                 // RTZ
-                //3'b010: inc_round = (~s2_sign) & any_round_bits;                          // RUP
-                //3'b011: inc_round = ( s2_sign) & any_round_bits;                          // RDN
-                default: inc_round = guard_bit & (sticky_bit | mant_trunc[0]);
+                3'b001: inc_round = 1'b0;                                                 // RTZ
+                3'b010: inc_round = (~s2_sign) & any_round_bits;                          // RUP
+                3'b011: inc_round = ( s2_sign) & any_round_bits;                          // RDN
+                default: inc_round = guard_bit & (round_bit | sticky_bit | mant_trunc[0]);//IEEE 754 默认 RNE
             endcase
         end
     end
@@ -397,15 +401,14 @@ endgenerate
     reg flag_underflow;
 
     always @(*) begin
-        if (s2_exp == EXP_MAX) begin
+    /* if (s2_exp == EXP_MAX) begin
                 mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
                 mant_final       = mant_trunc;
                 exp_final        = s2_exp;
                 flag_overflow    = 1'b0;
                 flag_underflow   = 1'b0;
             end
-
-        else begin
+        else begin*/
             // 默认：normal
             mant_ext_rounded = {1'b0, mant_trunc} + {{OUTPC{1'b0}}, inc_round};
             mant_final       = mant_trunc;
@@ -424,7 +427,7 @@ endgenerate
                 // 舍入进位导致规格化（mant_ext_rounded[OUTPC]==1）
                 if (mant_ext_rounded[OUTPC]) begin
                     mant_final = mant_ext_rounded[OUTPC:1];
-                    if (s2_exp == (EXP_MAX - 1'b1)) begin
+                    if (s2_exp >= (EXP_MAX - 1'b1)) begin
                         // normal 溢出 -> Inf
                         exp_final     = EXP_MAX;
                         mant_final    = {OUTPC{1'b0}};
@@ -441,7 +444,7 @@ endgenerate
                     end
                 end
             end
-        end
+       // end
     end
 
     // 5) 结果打包：注意 overflow->Inf 的符号应来自 s2_sign，不是 sp_inf_sign
