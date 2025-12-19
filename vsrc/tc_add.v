@@ -286,7 +286,6 @@ endgenerate
             end
         end
     end
-
 // Stage2：rounding + overflow/underflow + pack + fflags
 
     //解析 mant/guard/sticky
