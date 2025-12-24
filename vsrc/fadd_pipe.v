@@ -175,7 +175,7 @@ module fadd_pipe #(
         k_reg = {EXPWIDTH{1'b0}};
         for (integer i = SUM_WIDTH-1; i >= 0; i = i - 1) begin
             if (SUM[i]) begin
-                k_reg = i[EXPWIDTH-1:0];;  // 找到最高位1的位置
+                k_reg = i[EXPWIDTH-1:0];  // 找到最高位1的位置
                 break;  // 找到后可以退出
             end
         end
