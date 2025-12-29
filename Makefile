@@ -1,4 +1,4 @@
-TOPNAME ?= fadd_pipe
+TOPNAME ?= tc_add
 VERILATOR = verilator
 BUILD_DIR = ./build
 OBJ_DIR = $(BUILD_DIR)/obj_dir
