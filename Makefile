@@ -1,4 +1,4 @@
-TOPNAME ?= tc_add
+TOPNAME ?= precision_tran
 VERILATOR = verilator
 BUILD_DIR = ./build
 OBJ_DIR = $(BUILD_DIR)/obj_dir
