@@ -23,4 +23,7 @@
 `define TC_SRAM_DEPTH      1024
 `define TC_SRAM_ADDR_WIDTH 10
 
+`define DEPTH_WARP          $clog2(`NUM_WARP) //the depth of warp
+`define NUM_WARP            8      //the number of warp,CTA need
+
 `endif // TENSOR_CORE_PARAMS_VH

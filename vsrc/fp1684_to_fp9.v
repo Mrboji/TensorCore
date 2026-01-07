@@ -1,10 +1,10 @@
 module fp1684_to_fp9 #(
     parameter EXP_WIDTH_IN      = 4,
     parameter FRAC_WIDTH_IN     = 3,
-    parameter ELEMENT_WIDTH_IN  = EXP_WIDTH + FRAC_WIDTH + 1,
+    parameter ELEMENT_WIDTH_IN  = EXP_WIDTH_IN + FRAC_WIDTH_IN + 1,
     parameter EXP_WIDTH_OUT     = 5,
     parameter FRAC_WIDTH_OUT    = 3,
-    parameter ELEMENT_WIDTH_OUT = EXP_WIDTH + FRAC_WIDTH + 1
+    parameter ELEMENT_WIDTH_OUT = EXP_WIDTH_OUT + FRAC_WIDTH_OUT + 1
 ) (
     input      [4:0]   type_cd_i,
     input      [EXP_WIDTH_IN + FRAC_WIDTH_IN : 0]  float_num_in,

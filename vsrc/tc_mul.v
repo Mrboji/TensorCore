@@ -17,14 +17,13 @@ module tc_mul #(
     input  wire [DEPTH_WARP-1:0]             ctrl_warpid_i,   
 
     input  wire                              in_valid_i, 
-    output reg                               in_ready_o, 
+    output wire                              in_ready_o, 
     
-    output reg                               out_valid_o,
+    output wire                                out_valid_o,
     input  wire                              out_ready_i, 
 
-    output reg  [SHAPE_K*ELEMENT_WIDTH-1:0]  result_o,
-    output reg  [4:0]                        fflags_o,
-
+    output wire [SHAPE_K*ELEMENT_WIDTH-1:0]  result_o,
+    output wire [4:0]                        fflags_o,
     output wire [CTRL_C_WIDTH-1:0]           ctrl_c_o,   
     output wire [2:0]                        ctrl_rm_o, 
     output wire [7:0]                        ctrl_reg_idxw_o, 
