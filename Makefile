@@ -1,4 +1,4 @@
-TOPNAME ?= mv_mul
+TOPNAME ?= tc_mm_add
 VERILATOR = verilator
 BUILD_DIR = ./build
 OBJ_DIR = $(BUILD_DIR)/obj_dir

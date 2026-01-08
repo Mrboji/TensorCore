@@ -19,6 +19,9 @@ parameter  LENGTH_ALIGN = 64;
 localparam BIAS_IN  = (1 << (EXP_WIDTH_IN  - 1)) - 1;
 localparam BIAS_OUT = (1 << (EXP_WIDTH_OUT - 1)) - 1;
 
+localparam DIFF_ABS = (FRAC_WIDTH_OUT >= FRAC_WIDTH_IN) ? 
+                     (FRAC_WIDTH_OUT - FRAC_WIDTH_IN) : 
+                     (FRAC_WIDTH_IN - FRAC_WIDTH_OUT);
 
 wire sign_in;
 wire [LENGTH_ALIGN-1:0] exp_in;
@@ -90,7 +93,7 @@ always @(*) begin
                    exp_out == {LENGTH_ALIGN{1'b0}} ? {LENGTH_ALIGN{1'b0}} :
                    frac_in_large ? {{LENGTH_ALIGN-FRAC_WIDTH_OUT{1'b0}}, frac_in[FRAC_WIDTH_IN-1 : FRAC_WIDTH_IN-FRAC_WIDTH_OUT]} :
                    frac_equal    ? frac_in :
-                   frac_in_small ? {frac_in[LENGTH_ALIGN-FRAC_WIDTH_OUT+FRAC_WIDTH_IN-1:0], {FRAC_WIDTH_OUT-FRAC_WIDTH_IN{1'b0}}} : 
+                   frac_in_small ? {frac_in[LENGTH_ALIGN-DIFF_ABS-1:0], {DIFF_ABS{1'b0}}} : 
                    {LENGTH_ALIGN{1'b0}};
         float_num_out = {sign_in, exp_out[EXP_WIDTH_OUT-1:0], frac_out[FRAC_WIDTH_OUT-1:0]};
     end
