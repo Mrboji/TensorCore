@@ -104,7 +104,7 @@ module fadd_pipe #(
     reg [SUM_WIDTH:0] sum_stage2;
     reg stage1_valid;
     reg stage2_valid;
-    wire[SUM_WIDTH:0] result;
+    wire[TOTAL_WIDTH-1:0] result;
 
     // 阶段1：解包、对齐
     assign sign_a = a_i[EXPWIDTH+PRECISION];
